@@ -616,26 +616,6 @@ def main() -> None:
     # Validate configuration
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("❌ ERROR: BOT_TOKEN not configured!")
-        print("\nSetup options:")
-        print("1. Local: Edit config.json and add your bot token")
-        print("2. Render: Set BOT_TOKEN environment variable")
-        print("\nGet a token from @BotFather on Telegram")
-        return
-    
-    if not GROUP_ID or GROUP_ID == "@your_group_username":
-        print("⚠️ WARNING: GROUP_ID not configured")
-        print("The bot will not work until you set the group ID")
-    
-    if PRIVATE_MODE and not ADMIN_IDS:
-        print("⚠️ WARNING: Private mode is ON but no admin IDs configured")
-        print("Add your Telegram user ID to ADMIN_IDS in config.json or ADMIN_IDS env var")
-        print("Find your ID: Send /start to @userinfobot on Telegram")
-    
-    def main() -> None:
-    """Start the bot"""
-    # Validate configuration
-    if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ ERROR: BOT_TOKEN not configured!")
         return
     
     if PRIVATE_MODE and not ADMIN_IDS:
