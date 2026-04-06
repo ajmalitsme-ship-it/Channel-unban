@@ -1,447 +1,684 @@
 #!/usr/bin/env python3
 """
-TELEGRAM CHANNEL UNBAN TOOL - COMPLETE SINGLE FILE
-==================================================
-Features:
-- Unban users from channels/groups
-- Unban channels from groups  
-- Check channel ban status
-- Multiple API support (Pyrogram + Telethon)
-- Session management with reconnection
-- Rate limit protection
-- Copyright protection (legal disclaimer)
+Telegram Channel Unban & Protection Bot
+===========================================
+A complete solution for managing channel bans, copyright protection,
+and admin controls in Telegram groups.
 
-Requirements:
-pip install pyrogram tgcrypto telethon
+Features:
+✅ Unban channels from posting in groups
+✅ Ban channels with copyright protection
+✅ Auto-restrict new channels
+✅ Private bot mode (authorized users only)
+✅ Complete admin commands
+✅ Ready for Render deployment
+
+Official API Methods:
+- unbanChatSenderChat - Unban channels
+- banChatSenderChat - Ban channels  
+- restrictChatMember - Apply copyright restrictions
+- setChatPermissions - Set default permissions
+- getChatMember - Check admin status
+
+Author: Telegram Bot API
+Version: 2.0
 """
 
-import os
-import sys
 import asyncio
 import json
 import logging
+import os
+import sys
 from datetime import datetime
-from typing import Optional, Union
+from typing import Optional, Dict, List, Any
 
-# ==================== CONFIGURATION ====================
-# Get these from https://my.telegram.org/apps
-API_ID = 12345  # REPLACE WITH YOUR API ID
-API_HASH = "your_api_hash_here"  # REPLACE WITH YOUR API HASH
-PHONE_NUMBER = "+1234567890"  # REPLACE WITH YOUR PHONE NUMBER
+# ============= DEPENDENCY CHECK =============
+try:
+    from telegram import Bot, Update, ChatPermissions, ChatMember
+    from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+except ImportError:
+    print("❌ Missing required library. Install with: pip install python-telegram-bot==20.7")
+    sys.exit(1)
 
-# Session file name (stores login)
-SESSION_NAME = "telegram_unban_session"
+# ============= CONFIGURATION =============
+# Load from environment variables (Render) or config file
+CONFIG_FILE = "config.json"
 
-# Logging setup
+def load_config():
+    """Load configuration from environment variables or JSON file"""
+    
+    # Priority 1: Environment Variables (Render Deployment)
+    config = {
+        "bot_token": os.environ.get("BOT_TOKEN", "8570816432:AAFcLpn9P7Z-pRNQSJcn433lBAK-iU25q14"),
+        "group_id": os.environ.get("GROUP_ID", "-1003840130115"),
+        "admin_ids": os.environ.get("ADMIN_IDS", "8531814610").split(",") if os.environ.get("ADMIN_IDS") else [],
+        "private_mode": os.environ.get("PRIVATE_MODE", "true").lower() == "true",
+        "auto_protect": os.environ.get("AUTO_PROTECT", "true").lower() == "true",
+        "restricted_permissions": {
+            "can_send_messages": False,
+            "can_send_media": False,
+            "can_send_other_messages": False,
+            "can_add_web_page_previews": False
+        }
+    }
+    
+    # Priority 2: Config File (Local Development)
+    if not config["bot_token"] or config["bot_token"] == "":
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                file_config = json.load(f)
+                config.update(file_config)
+                print(f"✅ Loaded configuration from {CONFIG_FILE}")
+        except FileNotFoundError:
+            # Create template config file
+            default_config = {
+                "bot_token": "YOUR_BOT_TOKEN_HE",
+                "group_id": "@your_group_username",
+                "admin_ids": [123456789],  # Your Telegram user ID
+                "private_mode": True,
+                "auto_protect": True,
+                "restricted_permissions": {
+                    "can_send_messages": False,
+                    "can_send_media": False,
+                    "can_send_other_messages": False,
+                    "can_add_web_page_previews": False
+                }
+            }
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(default_config, f, indent=4)
+            print(f"📝 Created {CONFIG_FILE} - Please edit it with your bot token and group ID")
+            print(f"   Then run: python unban.py")
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            print(f"❌ Error parsing {CONFIG_FILE}: {e}")
+            sys.exit(1)
+    
+    # Clean up admin_ids
+    if isinstance(config["admin_ids"], list):
+        config["admin_ids"] = [int(uid) for uid in config["admin_ids"] if uid]
+    elif isinstance(config["admin_ids"], str):
+        config["admin_ids"] = [int(uid) for uid in config["admin_ids"].split(",") if uid]
+    else:
+        config["admin_ids"] = []
+    
+    return config
+
+config = load_config()
+
+BOT_TOKEN = config.get("bot_token", "")
+GROUP_ID = config.get("group_id", "")
+ADMIN_IDS = config.get("admin_ids", [])
+PRIVATE_MODE = config.get("private_mode", True)
+AUTO_PROTECT = config.get("auto_protect", True)
+RESTRICTED_PERMS = config.get("restricted_permissions", {})
+
+# ============= LOGGING SETUP =============
 logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('unban_log.txt'),
+        logging.FileHandler("bot.log"),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
-# ==================== LEGAL DISCLAIMER ====================
-LEGAL_DISCLAIMER = """
-╔══════════════════════════════════════════════════════════════╗
-║                    LEGAL DISCLAIMER                          ║
-╠══════════════════════════════════════════════════════════════╣
-║ This tool is for EDUCATIONAL PURPOSES ONLY.                  ║
-║ You may ONLY use this on channels/groups YOU OWN or          ║
-║ where you have EXPLICIT ADMIN PERMISSIONS.                   ║
-║                                                              ║
-║ Unauthorized unbanning or bypassing Telegram's restrictions  ║
-║ violates Telegram ToS and may be ILLEGAL in your country.    ║
-║                                                              ║
-║ The author assumes NO LIABILITY for misuse of this tool.     ║
-║ By using this software, you agree to these terms.            ║
-╚══════════════════════════════════════════════════════════════╝
-"""
+# ============= PERMISSION UTILITIES =============
 
-# ==================== TELEGRAM UNBAN CLASS ====================
+def get_restricted_permissions() -> ChatPermissions:
+    """Create restricted permissions for copyright protection"""
+    return ChatPermissions(
+        can_send_messages=RESTRICTED_PERMS.get("can_send_messages", False),
+        can_send_audios=RESTRICTED_PERMS.get("can_send_media", False),
+        can_send_documents=RESTRICTED_PERMS.get("can_send_media", False),
+        can_send_photos=RESTRICTED_PERMS.get("can_send_media", False),
+        can_send_videos=RESTRICTED_PERMS.get("can_send_media", False),
+        can_send_video_notes=RESTRICTED_PERMS.get("can_send_media", False),
+        can_send_voice_notes=RESTRICTED_PERMS.get("can_send_media", False),
+        can_send_polls=RESTRICTED_PERMS.get("can_send_other_messages", False),
+        can_send_other_messages=RESTRICTED_PERMS.get("can_send_other_messages", False),
+        can_add_web_page_previews=RESTRICTED_PERMS.get("can_add_web_page_previews", False),
+        can_invite_users=True,
+        can_pin_messages=False
+    )
 
-class TelegramUnbanTool:
-    """Complete Telegram unban tool with multiple API backends"""
-    
-    def init(self, api_id: int, api_hash: str, phone: str):
-        self.api_id = api_id
-        self.api_hash = api_hash
-        self.phone = phone
-        self.client = None
-        self.backend = None
-        
-    def show_disclaimer(self):
-        """Display legal disclaimer"""
-        print(LEGAL_DISCLAIMER)
-        response = input("\nDo you agree to these terms? (yes/no): ")
-        if response.lower() != 'yes':
-            logger.info("User declined terms. Exiting.")
-            sys.exit(0)
-        logger.info("Terms accepted.")
-    
-    async def init_pyrogram(self):
-        """Initialize Pyrogram client"""
-        try:
-            from pyrogram import Client
-            from pyrogram.errors import FloodWait, RPCError
-            
-            self.client = Client(
-                SESSION_NAME,
-                api_id=self.api_id,
-                api_hash=self.api_hash,
-                phone_number=self.phone
-            )
-            self.backend = "pyrogram"
-            await self.client.start()
-            me = await self.client.get_me()
-            logger.info(f"✅ Pyrogram connected as: {me.first_name} (@{me.username})")
-            return True
-        except ImportError:
-            logger.error("Pyrogram not installed. Run: pip install pyrogram tgcrypto")
-            return False
-        except Exception as e:
-            logger.error(f"Pyrogram init failed: {e}")
-            return False
-    
-    async def init_telethon(self):
-        """Initialize Telethon client (fallback)"""
-        try:
+def get_full_permissions() -> ChatPermissions:
+    """Create full permissions for unrestricting"""
+    return ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+        can_invite_users=True,
+        can_pin_messages=True
+    )
 
-from telethon import TelegramClient
-            from telethon.errors import FloodWaitError, RPCError
-            
-            self.client = TelegramClient(SESSION_NAME, self.api_id, self.api_hash)
-            await self.client.start(phone=self.phone)
-            me = await self.client.get_me()
-            self.backend = "telethon"
-            logger.info(f"✅ Telethon connected as: {me.first_name} (@{me.username})")
-            return True
-        except ImportError:
-            logger.error("Telethon not installed. Run: pip install telethon")
-            return False
-        except Exception as e:
-            logger.error(f"Telethon init failed: {e}")
-            return False
-    
-    async def init(self):
-        """Initialize with best available backend"""
-        self.show_disclaimer()
-        
-        # Try Pyrogram first
-        if await self.init_pyrogram():
-            return True
-        
-        # Fallback to Telethon
-        logger.info("Falling back to Telethon...")
-        if await self.init_telethon():
-            return True
-        
-        logger.error("No working backend found. Install pyrogram or telethon.")
-        return False
-    
-    async def unban_user(self, chat_id: Union[str, int], user_id: int) -> bool:
-        """
-        Unban a user from a channel/group
-        
-        Args:
-            chat_id: Channel username (@channel) or ID (-100123456789)
-            user_id: Telegram user ID to unban
-        
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            if self.backend == "pyrogram":
-                from pyrogram.errors import FloodWait, UserNotParticipant
-                
-                logger.info(f"Attempting to unban user {user_id} from {chat_id}")
-                result = await self.client.unban_chat_member(chat_id, user_id)
-                
-                if result:
-                    logger.info(f"✅ User {user_id} unbanned successfully")
-                    return True
-                else:
-                    logger.warning(f"⚠️ User {user_id} may not be banned or not found")
-                    return False
-                    
-            elif self.backend == "telethon":
-                from telethon.tl.functions.channels import EditBannedRequest
-                from telethon.tl.types import ChatBannedRights
-                
-                # Get channel entity
-                entity = await self.client.get_entity(chat_id)
-                
-                # Create unbanned rights (all False = remove restrictions)
-                unbanned_rights = ChatBannedRights(
-                    until_date=None,
-                    view_messages=False,
-                    send_messages=False,
-                    send_media=False,
-                    send_stickers=False,
-                    send_gifs=False,
-                    send_games=False,
-                    send_inline=False,
-                    send_polls=False,
-                    change_info=False,
-                    invite_users=False,
-                    pin_messages=False
-                )
-                
-                result = await self.client(EditBannedRequest(
-                    channel=entity,
-                    participant=user_id,
-                    banned_rights=unbanned_rights
-                ))
-                
-                logger.info(f"✅ User {user_id} unbanned successfully")
-                return True
-                
-        except Exception as e:
-            if "FloodWait" in str(e) or "FLOOD_WAIT" in str(e):
-                wait_time = int(str(e).split("_")[-1]) if "_" in str(e) else 10
-                logger.warning(f"Rate limited! Waiting {wait_time} seconds...")
-                await asyncio.sleep(wait_time)
-                return await self.unban_user(chat_id, user_id)
+# ============= AUTHORIZATION CHECK =============
 
-else:
-                logger.error(f"❌ Failed to unban user {user_id}: {e}")
-                return False
+async def is_authorized(update: Update) -> bool:
+    """Check if user is authorized to use bot commands"""
+    if not PRIVATE_MODE:
+        return True
     
-    async def unban_channel_from_group(self, group_id: Union[str, int], channel_id: int) -> bool:
-        """
-        Unban a channel from sending messages in a group
-        
-        Args:
-            group_id: Your group username or ID
-            channel_id: Channel ID to unban (negative, e.g., -100123456789)
-        
-        Returns:
-            bool: True if successful
-        """
-        try:
-            if self.backend == "pyrogram":
-                result = await self.client.unban_chat_member(group_id, channel_id)
-                if result:
-                    logger.info(f"✅ Channel {channel_id} can now send messages in {group_id}")
-                    return True
-                    
-            elif self.backend == "telethon":
-                from telethon.tl.functions.channels import EditBannedRequest
-                from telethon.tl.types import ChatBannedRights
-                
-                entity = await self.client.get_entity(group_id)
-                unbanned_rights = ChatBannedRights(
-                    until_date=None,
-                    send_messages=False,
-                    send_media=False,
-                    send_stickers=False,
-                    send_gifs=False,
-                    send_games=False,
-                    send_inline=False,
-                    send_polls=False
-                )
-                
-                result = await self.client(EditBannedRequest(
-                    channel=entity,
-                    participant=channel_id,
-                    banned_rights=unbanned_rights
-                ))
-                
-                logger.info(f"✅ Channel {channel_id} unbanned from group")
-                return True
-                
-        except Exception as e:
-            logger.error(f"❌ Failed to unban channel: {e}")
-            return False
+    user_id = update.effective_user.id
+    return user_id in ADMIN_IDS
+
+async def check_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Middleware to check authorization"""
+    if await is_authorized(update):
+        return True
     
-    async def check_channel_status(self, chat_id: Union[str, int]) -> dict:
-        """
-        Check if a channel is accessible and get its info
-        
-        Returns:
-            dict: {'accessible': bool, 'title': str, 'members': int, 'error': str}
-        """
-        result = {
-            'accessible': False,
-            'title': None,
-            'members': None,
-            'error': None
-        }
-        
-        try:
-            if self.backend == "pyrogram":
-                chat = await self.client.get_chat(chat_id)
-                result['accessible'] = True
-                result['title'] = chat.title
-                if hasattr(chat, 'members_count'):
-                    result['members'] = chat.members_count
-                    
-            elif self.backend == "telethon":
-                entity = await self.client.get_entity(chat_id)
-                result['accessible'] = True
-                result['title'] = entity.title
-                if hasattr(entity, 'participants_count'):
-                    result['members'] = entity.participants_count
-                    
-        except Exception as e:
-            result['error'] = str(e)
-            if "USERNAME_NOT_OCCUPIED" in str(e) or "CHANNEL_PRIVATE" in str(e):
-                logger.warning(f"⚠️ Channel {chat_id} appears to be banned or deleted")
-            else:
-                logger.error(f"Error checking channel: {e}")
-                
-        return result
+    await update.message.reply_text(
+        "🔒 **Private Bot Mode**\n\n"
+        "This bot is in private mode. You are not authorized to use it.\n\n"
+        "Contact the bot owner for access.",
+        parse_mode="Markdown"
+    )
+    logger.warning(f"Unauthorized access attempt from user {update.effective_user.id}")
+    return False
+
+# ============= COMMAND HANDLERS =============
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send welcome message with all commands"""
+    if not await check_auth(update, context):
+        return
     
-    async def bulk_unban(self, chat_id: Union[str, int], user_ids: list, delay: float = 2.0) -> dict:
-        """
-        Unban multiple users with delay between operations
-        
-        Args:
-            chat_id: Channel/group identifier
-            user_ids: List of user IDs to unban
-            delay: Seconds between each unban (avoid rate limits)
-        
-        Returns:
+    await update.message.reply_text(
+        "🤖 **Channel Unban & Protection Bot**\n\n"
+        "**Channel Management:**\n"
+        "/unbanchannel `<channel_id>` - Unban a channel from posting\n"
+        "/banchannel - Ban a channel (reply to channel message)\n"
+        "/restrictchannel - Apply copyright restrictions\n"
+        "/unrestrictchannel - Remove restrictions\n\n"
+        "**User Management:**\n"
+        "/banuser `<user_id>` - Ban a user\n"
+        "/unbanuser `<user_id>` - Unban a user\n\n"
+        "**Group Settings:**\n"
+        "/protect_on - Enable auto copyright protection\n"
+        "/protect_off - Disable auto protection\n"
+        "/getperms - View current permissions\n"
+        "/setfullperms - Grant full permissions to all\n\n"
+        "**Status:**\n"
+        "/status - Check bot status\n"
+        "/help - Show this help\n\n"
+        "📌 **Find Channel ID:** Forward message from channel to @userinfobot",
+        parse_mode="Markdown"
+    )
 
-dict: {'success': list, 'failed': list}
-        """
-        results = {'success': [], 'failed': []}
-        
-        for i, user_id in enumerate(user_ids, 1):
-            logger.info(f"Processing {i}/{len(user_ids)}: User {user_id}")
-            
-            if await self.unban_user(chat_id, user_id):
-                results['success'].append(user_id)
-            else:
-                results['failed'].append(user_id)
-            
-            if i < len(user_ids):  # Don't delay after last
-                await asyncio.sleep(delay)
-        
-        logger.info(f"Bulk unban complete: {len(results['success'])} success, {len(results['failed'])} failed")
-        return results
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await start(update, context)
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Check bot status and permissions"""
+    if not await check_auth(update, context):
+        return
     
-    async def close(self):
-        """Close the client connection"""
-        if self.client:
-            await self.client.disconnect()
-            logger.info("Disconnected from Telegram")
-
-
-# ==================== COMMAND LINE INTERFACE ====================
-
-async def interactive_mode(tool: TelegramUnbanTool):
-    """Interactive menu for unban operations"""
-    while True:
-        print("\n" + "="*50)
-        print("TELEGRAM UNBAN TOOL - INTERACTIVE MENU")
-        print("="*50)
-        print("1. Unban a single user")
-        print("2. Unban a channel from a group")
-        print("3. Check channel status")
-        print("4. Bulk unban (from file)")
-        print("5. Exit")
-        print("="*50)
-        
-        choice = input("\nSelect option (1-5): ").strip()
-        
-        if choice == "1":
-            chat = input("Channel/Group (e.g., @mychannel or -100123456789): ").strip()
-            user_id = int(input("User ID to unban: ").strip())
-            await tool.unban_user(chat, user_id)
-            
-        elif choice == "2":
-            group = input("Your group (e.g., @mygroup): ").strip()
-            channel_id = int(input("Channel ID to unban (e.g., -100123456789): ").strip())
-            await tool.unban_channel_from_group(group, channel_id)
-            
-        elif choice == "3":
-            chat = input("Channel to check (e.g., @channel): ").strip()
-            status = await tool.check_channel_status(chat)
-            print(f"\nStatus: {'✅ ACCESSIBLE' if status['accessible'] else '❌ NOT ACCESSIBLE'}")
-            if status['title']:
-                print(f"Title: {status['title']}")
-            if status['members']:
-                print(f"Members: {status['members']}")
-            if status['error']:
-                print(f"Error: {status['error']}")
-                
-        elif choice == "4":
-            chat = input("Channel/Group: ").strip()
-            file_path = input("File with user IDs (one per line): ").strip()
-            
-            try:
-                with open(file_path, 'r') as f:
-                    user_ids = [int(line.strip()) for line in f if line.strip()]
-                
-                print(f"Loaded {len(user_ids)} user IDs from {file_path}")
-                delay = float(input("Delay between unbans (seconds, default 2): ") or "2")
-                
-                results = await tool.bulk_unban(chat, user_ids, delay)
-                print(f"\n✅ Success: {len(results['success'])}")
-                print(f"❌ Failed: {len(results['failed'])}")
-                
-                if results['failed']:
-                    with open('failed_unbans.txt', 'w') as f:
-                        f.write('\n'.join(map(str, results['failed'])))
-                    print("Failed IDs saved to 'failed_unbans.txt'")
-                    
-            except FileNotFoundError:
-                print(f"File {file_path} not found")
-            except ValueError:
-                print("Invalid user ID in file")
-                
-        elif choice == "5":
-            print("Goodbye!")
-            break
-        else:
-            print("Invalid option")
-
-
-# ==================== MAIN ENTRY POINT ====================
-
-async def main():
-    """Main function"""
-    print("""
-    ╔══════════════════════════════════════════╗
-    ║     TELEGRAM UNBAN TOOL v1.0             ║
-    ║     Complete Single-File Solution        ║
-    ╚══════════════════════════════════════════╝
-    """)
-    
-    # Validate configuration
-    if API_ID == 12345 or API_HASH == "your_api_hash_here":
-        print("\n⚠️  CONFIGURATION REQUIRED!")
-        print("Please edit the file and set your:")
-        print("  - API_ID (from https://my.telegram.org/apps)")
-        print("  - API_HASH")
-        print("  - PHONE_NUMBER")
-        print("\nThen run again.\n")
-        sys.exit(1)
-    
-    # Initialize tool
-    tool = TelegramUnbanTool(API_ID, API_HASH, PHONE_NUMBER)
-    
-    if not await tool.init():
-        print("\n❌ Failed to initialize. Check your API credentials and internet connection.")
-        sys.exit(1)
-    
-    # Run interactive mode
-    await interactive_mode(tool)
-    
-    # Cleanup
-    await tool.close()
-
-
-if name == "main":
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Interrupted by user. Exiting...")
-        sys.exit(0)
+        bot = context.bot
+        chat = await bot.get_chat(GROUP_ID)
+        bot_member = await bot.get_chat_member(GROUP_ID, bot.id)
+        
+        status_text = (
+            f"📊 **Bot Status Report**\n\n"
+            f"**Group:** {chat.title}\n"
+            f"**Group ID:** `{chat.id}`\n"
+            f"**Bot Status:** {bot_member.status}\n"
+            f"**Can Restrict:** {bot_member.can_restrict_members if bot_member.status == 'administrator' else 'N/A'}\n"
+            f"**Private Mode:** {'🔒 ON' if PRIVATE_MODE else '🔓 OFF'}\n"
+            f"**Protection Mode:** {'🛡️ ON' if AUTO_PROTECT else '⚠️ OFF'}\n"
+            f"**Authorized Admins:** {len(ADMIN_IDS)}\n\n"
+            f"✅ Bot is ready to manage channels!"
+        )
+        
+        await update.message.reply_text(status_text, parse_mode="Markdown")
+        
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
+        await update.message.reply_text(f"❌ Status check failed: {str(e)}")
 
+# ============= CHANNEL BAN/UNBAN COMMANDS =============
+
+async def unban_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Unban a channel from posting in the group.
+    Uses official unbanChatSenderChat API method
+    """
+    if not await check_auth(update, context):
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ **Usage:** `/unbanchannel <channel_id>`\n\n"
+            "Example: `/unbanchannel -1009876543210`\n\n"
+            "Find channel ID by forwarding a message from the channel to @userinfobot",
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        channel_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Channel ID must be a number starting with -100")
+        return
+    
+    confirm_msg = await update.message.reply_text(f"🔄 Unbanning channel `{channel_id}`...", parse_mode="Markdown")
+    
+    try:
+        # OFFICIAL API METHOD: unbanChatSenderChat
+        result = await context.bot.unban_chat_sender_chat(
+            chat_id=GROUP_ID,
+            sender_chat_id=channel_id
+        )
+        
+        if result:
+            await confirm_msg.edit_text(
+                f"✅ **Channel Unbanned Successfully**\n\n"
+                f"**Channel ID:** `{channel_id}`\n\n"
+                f"The channel can now post messages in this group again.\n\n"
+                f"📌 Use `/banchannel` to ban it again if needed.",
+                parse_mode="Markdown"
+            )
+            logger.info(f"✅ Unbanned channel {channel_id} from {GROUP_ID}")
+        else:
+            await confirm_msg.edit_text("⚠️ Channel was not banned or unban failed.")
+            
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Unban failed: {error_msg}")
+        
+        if "not enough rights" in error_msg.lower():
+            await confirm_msg.edit_text(
+                "❌ **Bot lacks permissions**\n\n"
+                "Make the bot an admin with 'can_restrict_members' right."
+            )
+        elif "chat not found" in error_msg.lower():
+            await confirm_msg.edit_text(
+                f"❌ **Group not found**\n\n"
+                f"Check GROUP_ID in config: {GROUP_ID}"
+            )
+        else:
+            await confirm_msg.edit_text(f"❌ Error: {error_msg}")
+
+async def ban_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ban a channel from posting"""
+    if not await check_auth(update, context):
+        return
+    
+    # Check if replying to a channel message
+    if update.message.reply_to_message:
+        sender_chat = update.message.reply_to_message.sender_chat
+        if sender_chat:
+            channel_id = sender_chat.id
+            channel_name = sender_chat.title or f"Channel {channel_id}"
+        else:
+            await update.message.reply_text("❌ Reply to a message from the channel you want to ban")
+            return
+    elif context.args:
+        try:
+            channel_id = int(context.args[0])
+            channel_name = f"Channel {channel_id}"
+        except ValueError:
+            await update.message.reply_text("❌ Provide a valid channel ID (e.g., -1001234567890)")
+            return
+    else:
+        await update.message.reply_text("❌ Reply to a channel message or provide channel ID: /banchannel -1001234567890")
+        return
+
+    try:
+        # OFFICIAL API METHOD: banChatSenderChat
+        result = await context.bot.ban_chat_sender_chat(
+            chat_id=GROUP_ID,
+            sender_chat_id=channel_id
+        )
+        
+        if result:
+            await update.message.reply_text(
+                f"✅ **Channel Banned**\n\n"
+                f"**Channel:** {channel_name}\n"
+                f"**ID:** `{channel_id}`\n\n"
+                f"Use `/unbanchannel {channel_id}` to unban.",
+                parse_mode="Markdown"
+            )
+            logger.info(f"Banned channel {channel_id}")
+        else:
+            await update.message.reply_text("⚠️ Ban failed")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# ============= RESTRICTION COMMANDS =============
+
+async def restrict_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Apply copyright protection restrictions to a channel"""
+    if not await check_auth(update, context):
+        return
+    
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Reply to a channel message to restrict it")
+        return
+    
+    sender_chat = update.message.reply_to_message.sender_chat
+    if not sender_chat:
+        await update.message.reply_text("❌ This message is not from a channel")
+        return
+    
+    try:
+        result = await context.bot.restrict_chat_member(
+            chat_id=GROUP_ID,
+            user_id=sender_chat.id,
+            permissions=get_restricted_permissions()
+        )
+        
+        if result:
+            await update.message.reply_text(
+                f"🔒 **Copyright Protection Applied**\n\n"
+                f"**Channel:** {sender_chat.title or sender_chat.id}\n\n"
+                f"**Restrictions:**\n"
+                f"❌ Cannot send messages\n"
+                f"❌ Cannot send media\n"
+                f"❌ Cannot send polls or stickers\n\n"
+                f"Use `/unrestrictchannel` to remove restrictions.",
+                parse_mode="Markdown"
+            )
+            logger.info(f"Restricted channel {sender_chat.id}")
+        else:
+            await update.message.reply_text("⚠️ Failed to restrict channel")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def unrestrict_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove restrictions from a channel"""
+    if not await check_auth(update, context):
+        return
+    
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Reply to a restricted channel's message")
+        return
+    
+    sender_chat = update.message.reply_to_message.sender_chat
+    if not sender_chat:
+        await update.message.reply_text("❌ This message is not from a channel")
+        return
+    
+    try:
+        result = await context.bot.restrict_chat_member(
+            chat_id=GROUP_ID,
+            user_id=sender_chat.id,
+            permissions=get_full_permissions()
+        )
+        
+        if result:
+            await update.message.reply_text(
+                f"✅ **Channel Unrestricted**\n\n"
+                f"**Channel:** {sender_chat.title or sender_chat.id}\n\n"
+                f"Full permissions granted.",
+                parse_mode="Markdown"
+            )
+            logger.info(f"Unrestricted channel {sender_chat.id}")
+        else:
+            await update.message.reply_text("⚠️ Failed to unrestrict channel")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# ============= PROTECTION MODE =============
+
+async def protect_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Enable automatic copyright protection"""
+    if not await check_auth(update, context):
+        return
+    
+    global AUTO_PROTECT
+    AUTO_PROTECT = True
+    config["auto_protect"] = True
+    
+    # Save to config file
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+    except:
+        pass
+    
+    await update.message.reply_text(
+        "🛡️ **Copyright Protection Mode: ENABLED**\n\n"
+        "New channels posting in the group will be automatically restricted.\n\n"
+        "Use `/protect_off` to disable.",
+        parse_mode="Markdown"
+    )
+
+async def protect_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Disable automatic copyright protection"""
+    if not await check_auth(update, context):
+        return
+    
+    global AUTO_PROTECT
+    AUTO_PROTECT = False
+    config["auto_protect"] = False
+    
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+    except:
+        pass
+    
+    await update.message.reply_text(
+        "⚠️ **Copyright Protection Mode: DISABLED**\n\n"
+        "Channels will not be automatically restricted.\n\n"
+        "Use `/protect_on` to enable.",
+        parse_mode="Markdown"
+    )
+
+async def set_full_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set full permissions for all members"""
+    if not await check_auth(update, context):
+        return
+    
+    try:
+        result = await context.bot.set_chat_permissions(
+            chat_id=GROUP_ID,
+            permissions=get_full_permissions()
+        )
+        
+        if result:
+            await update.message.reply_text(
+                "✅ **Full permissions granted to all members**\n\n"
+                "Use `/restrictchannel` to apply copyright restrictions to specific channels.",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("⚠️ Failed to update permissions")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def get_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Get current permissions for the group"""
+    if not await check_auth(update, context):
+        return
+    
+    try:
+        chat = await context.bot.get_chat(GROUP_ID)
+        perms = chat.permissions
+        
+        perms_text = (
+            f"📊 **Current Group Permissions**\n\n"
+            f"Send Messages: {'✅' if perms.can_send_messages else '❌'}\n"
+            f"Send Media: {'✅' if perms.can_send_audios else '❌'}\n"
+            f"Send Polls: {'✅' if perms.can_send_polls else '❌'}\n"
+            f"Send Stickers/GIFs: {'✅' if perms.can_send_other_messages else '❌'}\n"
+            f"Add Web Previews: {'✅' if perms.can_add_web_page_previews else '❌'}\n\n"
+            f"**Protection Mode:** {'🛡️ ON' if AUTO_PROTECT else '⚠️ OFF'}\n"
+            f"**Private Mode:** {'🔒 ON' if PRIVATE_MODE else '🔓 OFF'}"
+        )
+        
+        await update.message.reply_text(perms_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# ============= USER BAN/UNBAN =============
+
+async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ban a user from the group"""
+    if not await check_auth(update, context):
+        return
+    
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /banuser <user_id>")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        await context.bot.ban_chat_member(GROUP_ID, user_id)
+        await update.message.reply_text(f"✅ User {user_id} banned successfully")
+        logger.info(f"Banned user {user_id}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Unban a user from the group"""
+    if not await check_auth(update, context):
+        return
+    
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /unbanuser <user_id>")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        await context.bot.unban_chat_member(GROUP_ID, user_id)
+        await update.message.reply_text(f"✅ User {user_id} unbanned successfully")
+        logger.info(f"Unbanned user {user_id}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# ============= AUTO PROTECT HANDLER =============
+
+async def auto_protect_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Automatically restrict new channels when they post"""
+    if not AUTO_PROTECT:
+        return
+    
+    message = update.message
+    if not message or not message.sender_chat:
+        return
+    
+    # Check if this is a channel posting
+    if message.sender_chat.type == "channel":
+        channel_id = message.sender_chat.id
+        
+        try:
+            # Auto-restrict the channel
+            await context.bot.restrict_chat_member(
+                chat_id=GROUP_ID,
+                user_id=channel_id,
+                permissions=get_restricted_permissions()
+            )
+            logger.info(f"Auto-restricted channel {channel_id}")
+            
+            # Notify admins (optional)
+            for admin_id in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(
+                        admin_id,
+                        f"🛡️ **Auto Protection Triggered**\n\n"
+                        f"Channel `{channel_id}` has been automatically restricted.\n"
+                        f"Use `/unrestrictchannel` to remove restrictions.",
+                        parse_mode="Markdown"
+                    )
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.error(f"Auto-protect failed: {e}")
+
+# ============= HEALTH CHECK (for Render) =============
+
+async def health_check():
+    """Simple health check for Render deployment"""
+    print("🤖 Bot is running and healthy")
+    print(f"Group ID: {GROUP_ID}")
+    print(f"Private Mode: {PRIVATE_MODE}")
+    print(f"Auto Protect: {AUTO_PROTECT}")
+    print(f"Authorized Admins: {len(ADMIN_IDS)}")
+
+# ============= MAIN FUNCTION =============
+
+def main() -> None:
+    """Start the bot"""
+    # Validate configuration
+    if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ ERROR: BOT_TOKEN not configured!")
+        print("\nSetup options:")
+        print("1. Local: Edit config.json and add your bot token")
+        print("2. Render: Set BOT_TOKEN environment variable")
+        print("\nGet a token from @BotFather on Telegram")
+        return
+    
+    if not GROUP_ID or GROUP_ID == "@your_group_username":
+        print("⚠️ WARNING: GROUP_ID not configured")
+        print("The bot will not work until you set the group ID")
+    
+    if PRIVATE_MODE and not ADMIN_IDS:
+        print("⚠️ WARNING: Private mode is ON but no admin IDs configured")
+        print("Add your Telegram user ID to ADMIN_IDS in config.json or ADMIN_IDS env var")
+        print("Find your ID: Send /start to @userinfobot on Telegram")
+    
+    # Create application
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("status", status))
+    
+    # Channel management
+    application.add_handler(CommandHandler("unbanchannel", unban_channel))
+    application.add_handler(CommandHandler("banchannel", ban_channel))
+    application.add_handler(CommandHandler("restrictchannel", restrict_channel))
+    application.add_handler(CommandHandler("unrestrictchannel", unrestrict_channel))
+    
+    # Protection mode
+    application.add_handler(CommandHandler("protect_on", protect_on))
+    application.add_handler(CommandHandler("protect_off", protect_off))
+    application.add_handler(CommandHandler("setfullperms", set_full_permissions))
+    application.add_handler(CommandHandler("getperms", get_permissions))
+    
+    # User management
+    application.add_handler(CommandHandler("banuser", ban_user))
+    application.add_handler(CommandHandler("unbanuser", unban_user))
+    
+    # Auto-protect handler for channel messages
+    application.add_handler(MessageHandler(filters.ALL, auto_protect_handler))
+    
+    # Print startup message
+    print("\n" + "="*50)
+    print("🤖 Telegram Channel Unban Bot Started")
+    print("="*50)
+    print(f"Group: {GROUP_ID}")
+    print(f"Private Mode: {'ON' if PRIVATE_MODE else 'OFF'}")
+    print(f"Auto Protect: {'ON' if AUTO_PROTECT else 'OFF'}")
+    print(f"Admins: {len(ADMIN_IDS)}")
+    print("="*50)
+    print("Commands available:")
+    print("  /unbanchannel <id> - Unban a channel")
+    print("  /banchannel - Ban a channel")
+    print("  /restrictchannel - Apply copyright protection")
+    print("  /status - Check bot status")
+    print("="*50 + "\n")
+    
+    # Run health check
+    asyncio.create_task(health_check())
+    
+    # Start polling
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()                                            
