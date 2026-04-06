@@ -631,6 +631,17 @@ def main() -> None:
         print("Add your Telegram user ID to ADMIN_IDS in config.json or ADMIN_IDS env var")
         print("Find your ID: Send /start to @userinfobot on Telegram")
     
+    def main() -> None:
+    """Start the bot"""
+    # Validate configuration
+    if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ ERROR: BOT_TOKEN not configured!")
+        return
+    
+    if PRIVATE_MODE and not ADMIN_IDS:
+        print("⚠️ WARNING: Private mode is ON but no admin IDs configured")
+        print("Add ADMIN_IDS environment variable or add to config.json")
+    
     # Create application
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -638,24 +649,16 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status))
-    
-    # Channel management
     application.add_handler(CommandHandler("unbanchannel", unban_channel))
     application.add_handler(CommandHandler("banchannel", ban_channel))
     application.add_handler(CommandHandler("restrictchannel", restrict_channel))
     application.add_handler(CommandHandler("unrestrictchannel", unrestrict_channel))
-    
-    # Protection mode
     application.add_handler(CommandHandler("protect_on", protect_on))
     application.add_handler(CommandHandler("protect_off", protect_off))
     application.add_handler(CommandHandler("setfullperms", set_full_permissions))
     application.add_handler(CommandHandler("getperms", get_permissions))
-    
-    # User management
     application.add_handler(CommandHandler("banuser", ban_user))
     application.add_handler(CommandHandler("unbanuser", unban_user))
-    
-    # Auto-protect handler for channel messages
     application.add_handler(MessageHandler(filters.ALL, auto_protect_handler))
     
     # Print startup message
@@ -666,19 +669,12 @@ def main() -> None:
     print(f"Private Mode: {'ON' if PRIVATE_MODE else 'OFF'}")
     print(f"Auto Protect: {'ON' if AUTO_PROTECT else 'OFF'}")
     print(f"Admins: {len(ADMIN_IDS)}")
-    print("="*50)
-    print("Commands available:")
-    print("  /unbanchannel <id> - Unban a channel")
-    print("  /banchannel - Ban a channel")
-    print("  /restrictchannel - Apply copyright protection")
-    print("  /status - Check bot status")
     print("="*50 + "\n")
     
-    # Run health check
-    asyncio.create_task(health_check())
+    # REMOVED: asyncio.create_task(health_check())  # ← DELETE THIS LINE
     
     # Start polling
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()                                            
+    main()
